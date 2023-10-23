@@ -46,12 +46,6 @@
 //
 static bool starcoder_model_eval_internal(model_context& lctx, const model_token* tokens, const int n_tokens,
                                           const int n_past, const int n_threads) {
-  // // enforce that the first token is BOS
-  // if (n_past == 0 && tokens[0] != model_token_bos()) {
-  //   fprintf(stderr, "%s: first token must be BOS\n", __func__);
-  //   return false;
-  // }
-
   const int64_t t_start_us = ne_time_us();
 
   const int N = n_tokens;
@@ -188,7 +182,7 @@ static bool starcoder_model_eval_internal(model_context& lctx, const model_token
       //                1, 2, 0, 3),
       //            ne_new_tensor_3d(ctx0, NE_TYPE_F32, n_past + N, n_embd/n_head, n_head, NE_SIZE_CALC));
 
-      // struct ne_tensor * KQV = ne_flash_attn(ctx0, Q, K, V, true);
+      // struct ne_tensor * KQV = ne_flash_attn(ctx0, Q, K, V, NE_ATTN_FLAG_IS_CAUSAL);
 
       // K * Q
       // [n_past + N, N, 12]

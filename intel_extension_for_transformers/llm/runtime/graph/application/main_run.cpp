@@ -20,11 +20,13 @@
 #include <cinttypes>
 #include <cstdio>
 #include <ctime>
+#include <codecvt>
 #include <fstream>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <random>
+#include <regex>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -49,17 +51,6 @@ static console_state con_st;
 static model_context** g_ctx;
 
 static bool is_interacting = false;
-
-std::string build_prompt(const std::vector<std::string>& history) {
-  std::ostringstream oss_prompt;
-  for (size_t i = 0; i < history.size(); i += 2) {
-    oss_prompt << "[Round " << i / 2 + 1 << "]\n\n问：" << history[i] << "\n\n答：";
-    if (i < history.size() - 1) {
-      oss_prompt << history[i + 1] << "\n\n";
-    }
-  }
-  return oss_prompt.str();
-}
 
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__)) || defined(_WIN32)
 void sigint_handler(int signo) {
@@ -157,7 +148,7 @@ int main(int argc, char** argv) {
   // uncomment the "used_mem" line in graph to see the results
   if (params.mem_test) {
     {
-      const std::vector<model_token> tmp(params.n_batch, model_token_bos());
+      const std::vector<model_token> tmp(params.n_batch, ctx->vocab.bos_token_id);
       model_eval(ctx, tmp.data(), tmp.size(), 0, params.n_threads);
     }
 
@@ -212,12 +203,16 @@ int main(int argc, char** argv) {
   }
 
   std::vector<int> embd_inp;
-  if (params.model_arch == MODEL_CHATGLM2 || params.model_arch == MODEL_CHATGLM1) {
+  if (params.model_arch == MODEL_CHATGLM2) {
     std::vector<std::string> prompts;
     prompts.push_back(params.prompt);
-    std::string prompt = build_prompt(prompts);
+    std::string prompt = build_prompt_glm2(prompts);
     embd_inp = ::model_tokenize(ctx, prompt, false);
     embd_inp.insert(embd_inp.begin(), {64790, 64792});  // special prefix
+  } else if (params.model_arch == MODEL_CHATGLM || params.model_arch == MODEL_BAICHUAN) {
+    for (auto& i : params.ids) {
+      embd_inp.emplace_back(i);
+    }
   } else {
     embd_inp = ::model_tokenize(ctx, params.prompt, add_bos);
   }
@@ -393,25 +388,16 @@ int main(int argc, char** argv) {
       // - take the n_keep first tokens from the original prompt (via n_past)
       // - take half of the last (n_ctx - n_keep) tokens and recompute the logits in batches
       if (n_past + (int)embd.size() > n_ctx) {
-        const int n_left = n_past - params.n_keep;
-
-        // always keep the first token - BOS
+        // always keep the first token
         n_past = std::max(1, params.n_keep);
 
-        // insert n_left/2 tokens at the start of embd from last_n_tokens
-        embd.insert(embd.begin(), last_n_tokens.begin() + n_ctx - n_left / 2 - embd.size(),
-                    last_n_tokens.end() - embd.size());
+        int n_discard = params.n_discard;
+        if (n_discard == -1) n_discard = (n_ctx - embd.size() - params.n_keep) / 2;
+        // drop n_discard tokens
+        embd.insert(embd.begin(), last_n_tokens.begin() + params.n_keep + n_discard, last_n_tokens.end() - embd.size());
 
         // stop saving session if we run out of context
         path_session.clear();
-
-        // printf("\n---\n");
-        // printf("resetting: '");
-        // for (int i = 0; i < (int) embd.size(); i++) {
-        //     printf("%s", model_token_to_str(ctx, embd[i]));
-        // }
-        // printf("'\n");
-        // printf("\n---\n");
       }
 
       // try to reuse a matching prefix from the loaded session instead of re-eval (via n_past)
@@ -461,15 +447,18 @@ int main(int argc, char** argv) {
 
         std::vector<model_token_data> candidates;
         candidates.reserve(n_vocab);
+        for (model_token token_id = 0; token_id < n_vocab; token_id++) {
+          candidates.emplace_back(model_token_data{token_id, logits[token_id], 0.0f});
+        }
+        model_token_data_array candidates_p = {candidates.data(), candidates.size(), false};
+
+#ifdef NE_BUILD_TESTS
         std::ofstream outFile("logits.txt", std::ios::app);
         for (model_token token_id = 0; token_id < n_vocab; token_id++) {
           outFile << logits[token_id] << " ";
-          candidates.emplace_back(model_token_data{token_id, logits[token_id], 0.0f});
         }
         outFile << "\n";
-
-        model_token_data_array candidates_p = {candidates.data(), candidates.size(), false};
-
+#endif
         // Apply penalties
         float nl_logit = logits[model_token_nl()];
         auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
@@ -527,7 +516,7 @@ int main(int argc, char** argv) {
       }
 
       // replace end of text token with newline token when in interactive mode
-      if (id == model_token_eos() && params.interactive && !params.instruct) {
+      if (id == ctx->vocab.eos_token_id && params.interactive && !params.instruct) {
         id = model_token_newline.front();
         if (params.antiprompt.size() != 0) {
           // tokenize and inject first reverse prompt
@@ -558,12 +547,30 @@ int main(int argc, char** argv) {
     }
 
     // display text
-    if (input_echo) {
-      for (auto id : embd) {
-        printf("%s", model_token_to_str(ctx, id));
+    if (params.model_arch == MODEL_CHATGLM || params.model_arch == MODEL_CHATGLM2 ||
+        params.model_arch == MODEL_BAICHUAN) {
+      static bool is_prompt = true;
+      if (input_echo) {
+        if (is_prompt == true) {
+          is_prompt = false;
+          continue;
+        }
+        for (auto id : embd) {
+          std::string s(model_token_to_str(ctx, id));
+          s = postprocess(s);
+          std::cout << s;
+        }
+        fflush(stdout);
       }
-      fflush(stdout);
+    } else {
+      if (input_echo) {
+        for (auto id : embd) {
+          printf("%s", model_token_to_str(ctx, id));
+        }
+        fflush(stdout);
+      }
     }
+
     // reset color to default if we there is no pending user input
     if (input_echo && (int)embd_inp.size() == n_consumed) {
       console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
@@ -657,7 +664,7 @@ int main(int argc, char** argv) {
     }
 
     // end of text token
-    if (!embd.empty() && embd.back() == model_token_eos()) {
+    if (!embd.empty() && embd.back() == ctx->vocab.eos_token_id) {
       if (params.instruct) {
         is_interacting = true;
       } else {

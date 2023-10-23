@@ -21,6 +21,7 @@ from typing import Optional, List, Dict
 from transformers import TrainingArguments, BitsAndBytesConfig
 from transformers.utils.versions import require_version
 from dataclasses import dataclass
+from .utils.common import get_device_type
 
 from .plugins import plugins
 
@@ -80,7 +81,7 @@ class ModelArguments:
         },
     )
     use_fast_tokenizer: bool = field(
-        default=True,
+        default=False,
         metadata={
             "help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."
         },
@@ -307,21 +308,21 @@ class FinetuningArguments:
         default="auto",
         metadata={
             "help": "What device to use for finetuning.",
-            "choices": ["cpu", "cuda", "habana", "auto"],
+            "choices": ["cpu", "cuda", "hpu", "auto"],
         },
     )
     lora_all_linear: bool = field(
-        default=False,
+        default=True,
         metadata={"help": "if True, will add adaptor for all linear for lora finetuning"},
     )
     task: Optional[str] = field(
         default="completion",
         metadata={"help": "task name, different task means different data format.",
-            "choices": ["completion", "chat", "summarization"]
+            "choices": ["completion", "chat", "summarization", "code-generation"]
             },
     )
     do_lm_eval: bool = field(
-        default=False,
+        default=True,
         metadata={"help": "whether to run the LM evaluation with EleutherAI/lm-evaluation-harness"},
     )
     lm_eval_tasks: Optional[List[str]] = field(
@@ -347,15 +348,14 @@ class FinetuningArguments:
 
 @dataclass
 class TTSDatasetArguments:
-    audio_paths: Optional[str] = field(default=None, metadata={"help": "The path of audios."})
-    gender: Optional[str] = field(default=None, metadata={"help": "Gender."})
-    language: Optional[str] = field(default="English", metadata={"help": "Language."})
+    audio_folder_path: Optional[str] = field(default=None, metadata={"help": "The path to the directory of audios."})
+    text_folder_path: Optional[str] = field(default=None, metadata={"help": "The path to the directory of texts."})
 
 @dataclass
 class TTSModelArguments:
     step: int = field(default=0, metadata={"help": "TTS model step."})
     warmup_step: int = field(default=0, metadata={"help": "TTS model warmup step."})
-    learning_rate: float = field(default=5e-5, metadata={"help": "Learning rate."})
+    learning_rate: float = field(default=1e-5, metadata={"help": "Learning rate."})
  
 @dataclass
 class BaseFinetuningConfig:
@@ -371,15 +371,14 @@ SummarizationFinetuningConfig = BaseFinetuningConfig
 CodeGenerationFinetuningConfig = BaseFinetuningConfig
 
 @dataclass
-class TTSFinetuningConfig(BaseFinetuningConfig):
-    training_args: TrainingArguments
+class TTSFinetuningConfig:
     dataset_args: TTSDatasetArguments
     model_args: TTSModelArguments
 
 @dataclass
 class GenerationConfig:
     device: str = "cpu"
-    temperature: float = 0.9
+    temperature: float = 0.1
     top_k: int = 1
     top_p: float = 0.75
     repetition_penalty: float = 1.1
@@ -390,7 +389,7 @@ class GenerationConfig:
     bad_words_ids: List[int] = None
     force_words_ids: List[int] = None
     use_hpu_graphs: bool = False
-    use_cache: bool = False
+    use_cache: bool = True
     audio_output_path: str = None
     cpu_jit: bool = False
     num_gpus: int = 0
@@ -404,8 +403,9 @@ class LoadingModelConfig:
     cpu_jit: bool = None
     peft_path: str = None
     use_hpu_graphs: bool = False
-    use_cache: bool = False
+    use_cache: bool = True
     use_deepspeed: bool = False
+    ipex_int8: bool = False
 
 @dataclass
 class WeightOnlyQuantizationConfig:
@@ -413,7 +413,7 @@ class WeightOnlyQuantizationConfig:
     bits: int = 8
     group_size: int = -1
     scheme: str = 'sym'
-    sym_full_range: bool = True
+    enable_full_range: bool = True
 
 @dataclass
 class AMPConfig:
@@ -421,23 +421,27 @@ class AMPConfig:
 
 class PipelineConfig:
     def __init__(self,
-                 model_name_or_path="meta-llama/Llama-2-7b-hf",
+                 model_name_or_path="meta-llama/Llama-2-7b-chat-hf",
                  tokenizer_name_or_path=None,
+                 hf_access_token=None,
                  device="auto",
                  plugins=plugins,
                  loading_config=None,
                  optimization_config=None):
         self.model_name_or_path = model_name_or_path
         self.tokenizer_name_or_path = tokenizer_name_or_path
-        self.device = device
+        self.hf_access_token = hf_access_token
+        if device == "auto":
+            self.device = get_device_type()
+        else:
+            self.device = device
+
         self.plugins = plugins
-        self.loading_config = loading_config if loading_config is not None else LoadingModelConfig()
+
+        self.loading_config = loading_config if loading_config is not None else \
+            LoadingModelConfig(cpu_jit=True if self.device == "cpu" else False, \
+                use_hpu_graphs = True if self.device == "hpu" else False)
         self.optimization_config = optimization_config if optimization_config is not None else AMPConfig()
         assert type(self.optimization_config) in [AMPConfig, WeightOnlyQuantizationConfig, BitsAndBytesConfig], \
             f"Expect optimization_config be an object of AMPConfig, WeightOnlyQuantizationConfig" + \
             " or BitsAndBytesConfig,got {type(self.optimization_config)}."
-        for plugin_name, plugin_value in self.plugins.items():
-            if plugin_value['enable']:
-                print(f"create {plugin_name} plugin instance...")
-                print(f"plugin parameters: ", plugin_value['args'])
-                plugins[plugin_name]["instance"] = plugin_value['class'](**plugin_value['args'])

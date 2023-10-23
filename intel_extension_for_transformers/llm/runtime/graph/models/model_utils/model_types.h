@@ -75,8 +75,9 @@ enum model_archs {
   MODEL_FALCON,
   MODEL_OPT,
   MODEL_BLOOM,
+  MODEL_BAICHUAN,
   MODEL_CHATGLM2,
-  MODEL_CHATGLM1
+  MODEL_CHATGLM
 };
 
 static const size_t MB = 1024 * 1024;
@@ -124,12 +125,6 @@ struct model_hparams {
   int32_t par_res = 1;                // for neox 1 = true, 0 = false
   uint32_t word_embed_proj_dim = 0;   // for opt
   bool do_layer_norm_before = false;  // for opt
-
-  // ChatGLM-1 & 2 tokenizer
-  int32_t bos_token_id = 0;
-  int32_t eos_token_id = 0;
-  int32_t pad_token_id = 0;
-  int32_t sep_token_id = 0;
 
   // ChatGLM-2
   int32_t multi_query_group_num = 0;
@@ -221,8 +216,10 @@ struct model_vocab {
 
   std::unordered_map<token, id> token_to_id;
   std::vector<token_score> id_to_token;
-  id bos_token_id = -1;  // The default value is -1
-  id eos_token_id = -1;  // The default value is -1
+  id bos_token_id = -1;
+  id eos_token_id = -1;
+  id pad_token_id = -1;
+  id sep_token_id = -1;
 };
 
 // reference: https://huggingface.co/docs/transformers/main_classes/text_generation#transformers.GenerationConfig
@@ -234,7 +231,7 @@ struct generation_config {
   // likelihood of the sequence (i.e. negative), `length_penalty` > 0.0 promotes longer sequences, while
   // `length_penalty` < 0.0 encourages shorter sequences. (default = 1.0)
   float length_penalty = 1.0f;
-  bool do_early_stopping = false;  // TODO
+  bool do_early_stopping = false;
 };
 
 class beam_search_kv_cache_reorder;  //  forward declaration
@@ -388,12 +385,11 @@ class model_name_to_arch {
   model_name_to_arch() {}
   // update this table if has new cpp model
   std::unordered_map<std::string, model_archs> name2arch_ = {
-      {"unknown", MODEL_UNKNOWN},   {"llama", MODEL_LLAMA},
-      {"gptj", MODEL_GPTJ},         {"mpt", MODEL_MPT},
-      {"opt", MODEL_OPT},           {"gptneox", MODEL_GPTNEOX},
-      {"dolly", MODEL_GPTNEOX},     {"starcoder", MODEL_STARCODER},
-      {"falcon", MODEL_FALCON},     {"bloom", MODEL_BLOOM},
-      {"chatglm2", MODEL_CHATGLM2}, {"chatglm1", MODEL_CHATGLM1}};
+      {"unknown", MODEL_UNKNOWN}, {"llama", MODEL_LLAMA},      {"gptj", MODEL_GPTJ},
+      {"mpt", MODEL_MPT},         {"opt", MODEL_OPT},          {"gptneox", MODEL_GPTNEOX},
+      {"dolly", MODEL_GPTNEOX},   {"polyglot", MODEL_GPTNEOX}, {"starcoder", MODEL_STARCODER},
+      {"falcon", MODEL_FALCON},   {"bloom", MODEL_BLOOM},      {"chatglm2", MODEL_CHATGLM2},
+      {"chatglm", MODEL_CHATGLM}, {"baichuan", MODEL_BAICHUAN}};
 };
 
 #ifdef __cplusplus

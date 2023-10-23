@@ -51,12 +51,6 @@
 //
 static bool gptj_model_eval_internal(model_context& lctx, const model_token* tokens, const int n_tokens,
                                      const int n_past, const int n_threads) {
-  // // enforce that the first token is BOS
-  // if (n_past == 0 && tokens[0] != model_token_bos()) {
-  //   fprintf(stderr, "%s: first token must be BOS\n", __func__);
-  //   return false;
-  // }
-
   const int64_t t_start_us = ne_time_us();
 
   const int batch_size = lctx.batch_size;  // num of beams of all batches
@@ -102,6 +96,7 @@ static bool gptj_model_eval_internal(model_context& lctx, const model_token* tok
     attn_shape_t attn_shape = {
         /* .batch_size = */ batch_size,
         /* .head_num = */ n_head,
+        /* .heads_kv = */ n_head,  // GPT-J does not have MQA/GQA
         /* .head_size = */ n_embd / n_head,
         /* .sl_q = */ N,  // Note: make sure that jblas reordered attn supports next token inferencing
         /* .sl_kv = */ n_past + N,
@@ -109,7 +104,7 @@ static bool gptj_model_eval_internal(model_context& lctx, const model_token* tok
     NE_ASSERT(("jblas managed kv-cache not supported; use `--memory-f16 / --memory-f32` instead",
                jblas_reordered_attn_fp32_support(&attn_shape)));
     kv_shape_t kv_shape{
-        /* .head_num = */ static_cast<uint32_t>(n_head),
+        /* .heads_kv = */ static_cast<uint32_t>(n_head),
         /* .head_size = */ static_cast<uint32_t>(n_embd / n_head),
         /* .sl_kv_max = */ static_cast<uint32_t>(n_ctx),
     };
@@ -173,15 +168,7 @@ static bool gptj_model_eval_internal(model_context& lctx, const model_token* tok
                                                       1 * N * n_embd * batch_size * ne_element_size(QKVcur)),
                                            n_embd / n_head, n_head, N, batch_size),
                              n_past, n_rot, 0, 0);
-      if (!run_mha_reordered) {
-        Vcur = ne_view_1d(ctx0, QKVcur, N * n_embd * batch_size, 2 * N * n_embd * batch_size * ne_element_size(QKVcur));
-      } else {
-        Vcur = ne_reshape_4d(
-            ctx0,
-            ne_view_1d(ctx0, QKVcur, N * n_embd * batch_size, 2 * N * n_embd * batch_size * ne_element_size(QKVcur)),
-            n_embd / n_head, n_head, N, batch_size);
-      }
-
+      Vcur = ne_view_1d(ctx0, QKVcur, N * n_embd * batch_size, 2 * N * n_embd * batch_size * ne_element_size(QKVcur));
     } else {
       if (!enable_tp) {
         // printf("\n\n\n work into attention split,\n\n\n");
@@ -233,14 +220,14 @@ static bool gptj_model_eval_internal(model_context& lctx, const model_token* tok
       std::vector<ne_tensor*> v_bs(batch_size);
       for (int i = 0; i < batch_size; ++i) {
         if (run_mha_fp16) {
-          // batch K
+          // batch V
           Vcur_bs[i] = ne_view_4d(ctx0, Vcur, n_embd / n_head, n_head, N, 1, ne_element_size(Vcur) * n_embd / n_head,
                                   ne_element_size(Vcur) * n_embd, ne_element_size(Vcur) * n_embd * N,
                                   i * ne_element_size(Vcur) * n_embd * N);
           v_bs[i] = ne_view_1d(ctx0, kv_self.v, n_embd * N * 1,
                                (ne_element_size(kv_self.v) * n_embd) * (il * n_ctx * kv_n_ctx_block + n_past) +
                                    i * n_ctx * n_embd * ne_element_size(kv_self.v));
-          // batch V
+          // batch K
           Kcur_bs[i] = ne_permute(ctx0,
                                   ne_reshape_4d(ctx0,
                                                 ne_view_2d(ctx0, Kcur, n_embd, N, ne_element_size(Kcur) * n_embd,
@@ -291,7 +278,9 @@ static bool gptj_model_eval_internal(model_context& lctx, const model_token* tok
                                       head_size, n_ctx, n_head, batch_size,  // ne
                                       0, 0, v_size,                          // nb (jblas managed)
                                       il * kv_n_ctx_block * v_size);         // offset
-      ne_build_forward_expand(&gf, ne_flash_attn_update_v(ctx0, v_cache, Vcur, n_past));
+      // jblas alway view V as (D, n_head, seq, bs)
+      const auto Vcur_plain = ne_reshape_4d(ctx0, Vcur, n_embd / n_head, n_head, N, batch_size);
+      ne_build_forward_expand(&gf, ne_flash_attn_update_v(ctx0, v_cache, Vcur_plain, n_past));
     }
 
     struct ne_tensor* Q = ne_permute(ctx0, Qcur, 0, 2, 1, 3);
@@ -347,12 +336,14 @@ static bool gptj_model_eval_internal(model_context& lctx, const model_token* tok
 
     struct ne_tensor* KQV_merged_contiguous;
 
+    const float attn_scale = 1.0f / sqrtf(static_cast<float>(n_embd) / n_head);
+    ne_attn_flags_t attn_flags = NE_ATTN_FLAG_NONE;
+    if (n_past == 0) attn_flags |= NE_ATTN_FLAG_IS_CAUSAL;  // no causal mask on next-token cases
     if (run_mha_reordered) {  // reordered kv-cache bf16 mha must be used if run_mha_reordered
-      struct ne_tensor* KQV_Out = ne_flash_attn(ctx0, Q, K, V, 1.0f / sqrtf(float(n_embd) / n_head),
-                                                n_past == 0);  // no causal mask on next-token cases
+      struct ne_tensor* KQV_Out = ne_flash_attn(ctx0, Q, K, V, attn_scale, attn_flags);
       KQV_merged_contiguous = ne_view_2d(ctx0, KQV_Out, n_embd, N * batch_size, n_embd * ne_element_size(KQV_Out), 0);
     } else if (run_mha_fp16) {  // non-reordered kv-cache fp16 mha
-      struct ne_tensor* KQV_Out = ne_flash_attn(ctx0, Q, K, V, 1.0f / sqrtf(float(n_embd) / n_head), n_past == 0);
+      struct ne_tensor* KQV_Out = ne_flash_attn(ctx0, Q, K, V, attn_scale, attn_flags);
       KQV_merged_contiguous = ne_view_2d(ctx0, KQV_Out, n_embd, N * batch_size, n_embd * ne_element_size(KQV_Out), 0);
     } else if (n_past == 0 && run_mha_bf16_first) {
       // non-reordered kv-cache bf16 mha (first token only)
@@ -362,7 +353,7 @@ static bool gptj_model_eval_internal(model_context& lctx, const model_token* tok
       Vtmp = ne_view_4d(ctx0, Vtmp, n_embd / n_head, n_head, N, batch_size, ne_element_size(Vtmp) * n_embd / n_head,
                         ne_element_size(Vtmp) * n_embd, N * ne_element_size(Vtmp) * n_embd, 0);
       Vtmp = ne_permute(ctx0, Vtmp, 1, 2, 0, 3);
-      struct ne_tensor* KQV_Out = ne_flash_attn(ctx0, Q, K, Vtmp, 1.0f / sqrtf(float(n_embd) / n_head), n_past == 0);
+      struct ne_tensor* KQV_Out = ne_flash_attn(ctx0, Q, K, Vtmp, attn_scale, attn_flags);
       KQV_merged_contiguous = ne_view_2d(ctx0, KQV_Out, n_embd, N * batch_size, n_embd * ne_element_size(KQV_Out), 0);
     } else {
       // K * Q
@@ -370,7 +361,7 @@ static bool gptj_model_eval_internal(model_context& lctx, const model_token* tok
       ne_set_name(KQ, "KQ");
 
       // KQ_scaled = KQ / sqrt(n_embd/n_head)
-      struct ne_tensor* KQ_scale = ne_new_f32(ctx0, 1.0f / sqrtf(float(n_embd) / n_head));
+      struct ne_tensor* KQ_scale = ne_new_f32(ctx0, attn_scale);
       ne_set_name(KQ_scale, "1/sqrt(n_embd/n_head)");
 
       // KQ_scaled shape [n_past + N, N, n_head, 1]

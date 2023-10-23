@@ -1,17 +1,17 @@
 name: Deploy Model Test
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - ".github/workflows/deploy-test.yml"
-      - ".github/workflows/script/models/run_deploy.sh"
-      - "intel_extension_for_transformers/backends/**"
-      - "!intel_extension_for_transformers/llm/runtime/deprecated/kernels/**"
-      - "!intel_extension_for_transformers/llm/runtime/deprecated/test/**"
-      - "!intel_extension_for_transformers/llm/runtime/graph/**"
-      - "!intel_extension_for_transformers/llm/runtime/deprecated/third_party/**"
-      - "!intel_extension_for_transformers/llm/runtime/deprecated/docs/**"
+  #pull_request:
+  #  branches: [main]
+  #  paths:
+  #    - ".github/workflows/deploy-test.yml"
+  #    - ".github/workflows/script/models/run_deploy.sh"
+  #    - "intel_extension_for_transformers/llm/runtime/deprecated/**"
+  #    - "!intel_extension_for_transformers/llm/runtime/deprecated/kernels/**"
+  #    - "!intel_extension_for_transformers/llm/runtime/deprecated/test/**"
+  #    - "!intel_extension_for_transformers/llm/runtime/graph/**"
+  #    - "!intel_extension_for_transformers/llm/runtime/deprecated/third_party/**"
+  #    - "!intel_extension_for_transformers/llm/runtime/deprecated/docs/**"
 
   workflow_dispatch:
 
@@ -79,6 +79,7 @@ jobs:
           fi
           docker run -dit --disable-content-trust --privileged --name=${{ env.CONTAINER_NAME }} -v /dev/shm:/dev/shm \
           -v ${{ github.workspace }}:/intel-extension-for-transformers \
+          -v ~/.cache/oneAPI:/cache \
           ${{ env.REPO_NAME }}:${{ env.REPO_TAG }}
 
       - name: Env build
@@ -156,8 +157,6 @@ jobs:
           fi
       - name: Checkout out Repo
         uses: actions/checkout@v3
-        with:
-          submodules: "recursive"
 
       - name: Download Summary Log
         uses: actions/download-artifact@v3

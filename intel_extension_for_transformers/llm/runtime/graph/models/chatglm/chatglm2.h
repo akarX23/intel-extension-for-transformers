@@ -18,16 +18,15 @@
 #include "models/model_utils/model_files.h"
 #include "models/model_utils/model_types.h"
 
-enum chatglm_model {
-  CHATGLM_UNKNOWN,
-  CHATGLM_7B,
+enum chatglm2_model {
+  CHATGLM2_UNKNOWN,
+  CHATGLM2_6B,
 };
 
 static const model_scratch chatglm_mem_req(int n_layers) {
   switch (n_layers) {
     case 28:
       return {2048ull * MB, 2048ull * MB, 4096ull * MB};
-    // TODO(hengyu): add more variants besides 6B
     default:
       MODEL_ASSERT(false);
   }
