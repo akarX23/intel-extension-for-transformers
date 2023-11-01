@@ -761,7 +761,7 @@ def delete_user_infos(user_id: str):
 
 
 def forward_req_to_sd_inference_runner(inputs):
-    resp = requests.post("http://{}:{}".format("198.175.88.27", "80"),
+    resp = requests.post("http://{}:{}".format("127.0.0.1", "80"),
                          data=json.dumps(inputs), timeout=200)
     try:
         img_str = json.loads(resp.text)["img_str"]

@@ -21,6 +21,7 @@ import asyncio
 from typing import Optional
 from fastapi.routing import APIRouter
 from fastapi import APIRouter
+from ...plugins import plugins
 from ...cli.log import logger
 from ...config import GenerationConfig
 from ...utils.database.mysqldb import MysqlDb
@@ -386,6 +387,8 @@ async def handle_ai_photos_chat_to_image(request: Request):
 
     params = await request.json()
     query = params['query']
+    knowledge_id = params['knowldge_id']
+    voice_id = params['voice_id']
     logger.info(f'<chatWithImage> generating chat to image for user {user_id} with query: {query}')
 
     try:
@@ -489,3 +492,29 @@ async def handle_talkingbot_llm_tts(request: Request):
 
     return await router.handle_voice_chat_request(text, audio_output_path)
 
+
+@router.post("/v1/aiphotos/talkingbot/create_kb")
+async def retrieval_upload(file: UploadFile = File(...)):
+    global plugins
+    filename = file.filename
+    path_prefix = "./enterprise_docs/"
+    if not os.path.exists(path_prefix):
+        os.mkdir(path_prefix)
+    print(f"[askdoc - upload] filename: {filename}")
+    if '/' in filename:
+        filename = filename.split('/')[-1]
+    with open(f"{path_prefix+filename}", 'wb') as fout:
+        content = await file.read()
+        fout.write(content),
+    print("[askdoc - upload] file saved to local path.")
+
+    try:
+        print("[askdoc - upload] starting to append local db...")
+        instance = plugins['retrieval']["instance"]
+        instance.append_localdb(append_path=path_prefix)
+        print(f"[askdoc - upload] kb appended successfully")
+    except Exception as e:
+        logger.info(f"[askdoc - upload] create knowledge base failes! {e}")
+        return "Error occurred while uploading files."
+    fake_kb_id = "fake_knowledge_base_id"
+    return {"knowledge_base_id": fake_kb_id}
