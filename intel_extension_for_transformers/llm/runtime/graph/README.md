@@ -27,6 +27,7 @@ LLM Runtime supports the following models:
 |[OPT-125m](https://huggingface.co/facebook/opt-125m), [OPT-350m](https://huggingface.co/facebook/opt-350m), [OPT-1.3B](https://huggingface.co/facebook/opt-1.3b), [OPT-13B](https://huggingface.co/facebook/opt-13b)| ✅ | ✅ |
 |[ChatGLM-6B](https://huggingface.co/THUDM/chatglm-6b), [ChatGLM2-6B](https://huggingface.co/THUDM/chatglm2-6b)| ✅ | ✅ |
 |[Baichuan-13B-Chat](https://huggingface.co/baichuan-inc/Baichuan-13B-Chat), [Baichuan2-13B-Chat](https://huggingface.co/baichuan-inc/Baichuan2-13B-Chat)| ✅ | ✅ |
+|[Mistral-7B](https://huggingface.co/mistralai/Mistral-7B-v0.1)| ✅ | ✅ |
 
 ### Code Generation
 | model name | INT8 | INT4|
@@ -36,47 +37,33 @@ LLM Runtime supports the following models:
 
 
 ## How to Use
+There are two methods for utilizing the LLM runtime:
+- [Transformer-based API](#How-to-use-Transformer-based-API)
+- [Straightforward Python script](#How-to-use-Straightforward-Python-script)
 
-### 1. Install LLM Runtime
+
+## How to use: Transformer-based API
+### 1. Install
 Install from binary
 ```shell
 pip install intel-extension-for-transformers
 ```
 
-Build from source
-```shell
-# Linux
-git submodule update --init --recursive
-mkdir build
-cd build
-cmake .. -G Ninja
-ninja
-```
-
-```powershell
-# Windows
-# Install VisualStudio 2022 and open 'Developer PowerShell for VS 2022'
-mkdir build
-cd build
-cmake ..
-cmake --build . -j
-```
-
-### 2. Run LLM with Python API
+### 2. Run LLM with Transformer-based API
 
 You can use Python API to run Hugging Face model simply. Here is the sample code:
 ```python
 from transformers import AutoTokenizer, TextStreamer
 from intel_extension_for_transformers.transformers import AutoModelForCausalLM, WeightOnlyQuantConfig
 model_name = "Intel/neural-chat-7b-v1-1"     # Hugging Face model_id or local model
-woq_config = WeightOnlyQuantConfig(compute_dtype="int8", weight_dtype="int4")
-prompt = "Once upon a time, a little girl"
+config = WeightOnlyQuantConfig(compute_dtype="int8", weight_dtype="int4")
+prompt = "Once upon a time, there existed a little girl,"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 inputs = tokenizer(prompt, return_tensors="pt").input_ids
 streamer = TextStreamer(tokenizer)
 
-model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=woq_config, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=config)
 outputs = model.generate(inputs, streamer=streamer, max_new_tokens=300)
 ```
 
@@ -86,19 +73,20 @@ from transformers import AutoTokenizer, TextStreamer
 from intel_extension_for_transformers.transformers import AutoModelForCausalLM, WeightOnlyQuantConfig
 model_name = "Intel/neural-chat-7b-v1-1"     # Hugging Face model_id or local model
 woq_config = WeightOnlyQuantConfig(compute_dtype="int8", weight_dtype="int4")
-prompt = "Once upon a time, a little girl"
+prompt = "Once upon a time, there existed a little girl,"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 inputs = tokenizer(prompt, return_tensors="pt").input_ids
 streamer = TextStreamer(tokenizer)
 
-model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=woq_config, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=woq_config)
  
 # Paper: https://arxiv.org/pdf/2309.17453.pdf
 # Recommend n_keep=4 to do attention sinks (four initial tokens) and n_discard=-1 to drop half rencetly tokens when meet length threshold
 outputs = model.generate(inputs, streamer=streamer, max_new_tokens=300, ctx_size=100, n_keep=4, n_discard=-1)
-
 ```
+
+https://github.com/intel/intel-extension-for-transformers/assets/109187816/1698dcda-c9ec-4f44-b159-f4e9d67ab15b
 
 Argument description of generate function:
 | Argument          |  Type       | Description                                                                             |
@@ -124,9 +112,57 @@ Argument description of generate function:
 | n_keep            | Int         | Number of tokens to keep from the initial prompt (default: 0, -1 = all)                 |
 | n_discard         | Int         | Number of tokens will be discarded (default: -1, -1 = half of tokens will be discarded) |
 
+### 3. Chat with LLaMA2
+```python
+from transformers import AutoTokenizer, TextStreamer
+from intel_extension_for_transformers.transformers import AutoModelForCausalLM, WeightOnlyQuantConfig
+
+model_name = "meta-llama/Llama-2-7b-chat-hf"  # or local path to model
+woq_config = WeightOnlyQuantConfig(compute_dtype="int8", weight_dtype="int4")
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+streamer = TextStreamer(tokenizer)
+model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=woq_config, trust_remote_code=True)
+
+while True:
+    print("> ", end="")
+    prompt = input().strip()
+    if prompt == "quit":
+        break
+    b_prompt = "[INST]{}[/INST]".format(prompt)  # prompt template for llama2
+    inputs = tokenizer(b_prompt, return_tensors="pt").input_ids
+    outputs = model.generate(inputs, streamer=streamer, interactive=True, ignore_prompt=True,
+                num_beams=1, max_new_tokens=512, ctx_size = 512, do_sample=True, threads=28, repetition_penalty=1.1)
+```
 
 
-### 3. Run LLM with Python Script
+
+## How to use: Straightforward Python script
+Build from source
+> :warning: **If you want to use ```from_pretrain``` API**: please follow [Transformer-based API](#How-to-use-Transformer-based-API)
+
+```shell
+# Linux
+# make sure your path is in intel-extension-for-transformers/intel_extension_for_transformers/llm/runtime/graph folder
+git submodule update --init --recursive
+mkdir build
+cd build
+cmake .. -G Ninja
+ninja
+```
+
+```powershell
+# Windows
+# Install VisualStudio 2022 and open 'Developer PowerShell for VS 2022'
+# make sure your path is in intel-extension-for-transformers/intel_extension_for_transformers/llm/runtime/graph folder
+mkdir build
+cd build
+cmake ..
+cmake --build . -j
+```
+Note: add compile args ```-DNE_AVX512=OFF -DNE_AVX512_VBMI=OFF -DNE_AVX512_VNNI=OFF``` to ```cmake``` when compiling it on a CPU without AVX512
+
+
+### 1. Run LLM with Python Script
 You can run LLM with one-click python script including conversion, quantization and inference.
 ```
 python scripts/run.py model-path --weight_dtype int4 -p "She opened the door and see"
@@ -167,6 +203,9 @@ python scripts/convert.py --outtype f32 --outfile ne-f32.bin EleutherAI/gpt-j-6b
 # or you can download fp32 model (e.g., LLAMA2) from Hugging Face at first, then convert the pytorch model to ggml format.
 git clone https://huggingface.co/meta-llama/Llama-2-7b-chat-hf
 python scripts/convert.py --outtype f32 --outfile ne-f32.bin model_path
+
+# To convert model with PEFT(Parameter-Efficient Fine-Tuning) adapter, you need to merge the PEFT adapter into the model first, use below command to merge the PEFT adapter and save the merged model, afterwards you can use 'scripts/convert.py' just like above mentioned.
+python scripts/load_peft_and_merge.py --model_name_or_path meta-llama/Llama-2-7b-hf --peft_name_or_path dfurman/llama-2-7b-instruct-peft --save_path ./Llama-2-7b-hf-instruct-peft
 
 # quantize weights of fp32 ggml bin
 # model_name: llama, llama2, mpt, falcon, gptj, starcoder, dolly
@@ -233,3 +272,8 @@ Argument description of inference.py:
 ### 3. Tensor Parallelism cross nodes/sockets
 
 We support tensor parallelism strategy for distributed inference/training on multi-node and multi-socket.  You can refer to [tensor_parallelism.md](./tensor_parallelism.md) to enable this feature.
+
+
+### 4. Contribution
+
+You can consider adding your own models via [graph developer document](./developer_document.md).

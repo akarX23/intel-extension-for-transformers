@@ -67,6 +67,7 @@ class BaseModel(ABC):
         self.cache = None
         self.device = None
         self.conv_template = None
+        self.ipex_int8 = None
 
     def match(self, model_path: str):
         """
@@ -106,6 +107,7 @@ class BaseModel(ABC):
         self.use_hpu_graphs = kwargs["use_hpu_graphs"]
         self.cpu_jit = kwargs["cpu_jit"]
         self.use_cache = kwargs["use_cache"]
+        self.ipex_int8 = kwargs["ipex_int8"]
         load_model(model_name=kwargs["model_name"],
                    tokenizer_name=kwargs["tokenizer_name"],
                    device=kwargs["device"],
@@ -116,7 +118,8 @@ class BaseModel(ABC):
                    peft_path=kwargs["peft_path"],
                    use_deepspeed=kwargs["use_deepspeed"],
                    optimization_config=kwargs["optimization_config"],
-                   hf_access_token=kwargs["hf_access_token"])
+                   hf_access_token=kwargs["hf_access_token"],
+                   use_llm_runtime=kwargs["use_llm_runtime"])
 
     def predict_stream(self, query, config=None):
         """
@@ -133,6 +136,7 @@ class BaseModel(ABC):
         config.use_hpu_graphs = self.use_hpu_graphs
         config.cpu_jit = self.cpu_jit
         config.use_cache = self.use_cache
+        config.ipex_int8 = self.ipex_int8
 
         if is_audio_file(query):
             if not os.path.exists(query):
@@ -140,10 +144,12 @@ class BaseModel(ABC):
 
         query_include_prompt = False
         self.get_conv_template(self.model_name, config.task)
-        if self.conv_template.roles[0] in query and self.conv_template.roles[1] in query:
+        if (self.conv_template.roles[0] in query and self.conv_template.roles[1] in query) or \
+              "starcoder" in self.model_name:
             query_include_prompt = True
 
         # plugin pre actions
+        link = []
         for plugin_name in get_registered_plugins():
             if is_plugin_enabled(plugin_name):
                 plugin_instance = get_plugin_instance(plugin_name)
@@ -152,11 +158,13 @@ class BaseModel(ABC):
                         if plugin_name == "asr" and not is_audio_file(query):
                             continue
                         if plugin_name == "retrieval":
-                            response = plugin_instance.pre_llm_inference_actions(self.model_name, query)
+                            response, link = plugin_instance.pre_llm_inference_actions(self.model_name, query)
+                            if response == "Response with template.":
+                                return plugin_instance.response_template, link
                         else:
                             response = plugin_instance.pre_llm_inference_actions(query)
                         if plugin_name == "safety_checker" and response:
-                            return "Your query contains sensitive words, please try another query."
+                            return "Your query contains sensitive words, please try another query.", link
                         else:
                             if response != None and response != False:
                                 query = response
@@ -179,16 +187,7 @@ class BaseModel(ABC):
                             continue
                         response = plugin_instance.post_llm_inference_actions(response)
 
-        # clear plugins config
-        for key in plugins:
-            plugins[key] = {
-                "enable": False,
-                "class": None,
-                "args": {},
-                "instance": None
-            }
-
-        return response
+        return response, link
 
     def predict(self, query, config=None):
         """
@@ -205,6 +204,7 @@ class BaseModel(ABC):
         config.use_hpu_graphs = self.use_hpu_graphs
         config.cpu_jit = self.cpu_jit
         config.use_cache = self.use_cache
+        config.ipex_int8 = self.ipex_int8
 
         if is_audio_file(query):
             if not os.path.exists(query):
@@ -212,7 +212,8 @@ class BaseModel(ABC):
 
         query_include_prompt = False
         self.get_conv_template(self.model_name, config.task)
-        if self.conv_template.roles[0] in query and self.conv_template.roles[1] in query:
+        if (self.conv_template.roles[0] in query and self.conv_template.roles[1] in query) or \
+               "starcoder" in self.model_name:
             query_include_prompt = True
 
         # plugin pre actions
@@ -224,7 +225,9 @@ class BaseModel(ABC):
                         if plugin_name == "asr" and not is_audio_file(query):
                             continue
                         if plugin_name == "retrieval":
-                            response = plugin_instance.pre_llm_inference_actions(self.model_name, query)
+                            response, link = plugin_instance.pre_llm_inference_actions(self.model_name, query)
+                            if response == "Response with template.":
+                                return plugin_instance.response_template
                         else:
                             response = plugin_instance.pre_llm_inference_actions(query)
                         if plugin_name == "safety_checker" and response:
@@ -246,15 +249,6 @@ class BaseModel(ABC):
                 if plugin_instance:
                     if hasattr(plugin_instance, 'post_llm_inference_actions'):
                         response = plugin_instance.post_llm_inference_actions(response)
-
-        # clear plugins config
-        for key in plugins:
-            plugins[key] = {
-                "enable": False,
-                "class": None,
-                "args": {},
-                "instance": None
-            }
 
         return response
 
